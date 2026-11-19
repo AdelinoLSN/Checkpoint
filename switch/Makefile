@@ -30,11 +30,11 @@ include $(DEVKITPRO)/libnx/switch_rules
 #     - icon.jpg
 #     - <libnx folder>/default_icon.jpg
 #---------------------------------------------------------------------------------
-APP_TITLE	:=	Checkpoint
+APP_TITLE	:=	Checkpoint (User Prefix)
 APP_AUTHOR	:=	Bernardo Giordano, FlagBrew
 APP_VERSION	:=	${VERSION_MAJOR}.${VERSION_MINOR}.${VERSION_MICRO}
 
-TARGET			:=	$(subst $e ,_,$(notdir $(APP_TITLE)))
+TARGET			:=	Checkpoint
 OUTDIR			:=	out
 BUILD			:=	build
 FORMATSOURCES	:=	source source/script ../common ../common/script

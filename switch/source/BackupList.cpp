@@ -35,7 +35,6 @@
 #include "shapes.hpp"
 #include "titlecatalog.hpp"
 #include <algorithm>
-#include <cctype>
 #include <cmath>
 #include <optional>
 
@@ -199,28 +198,6 @@ void BackupList::rebuild(bool sizesOnly)
     }
 }
 
-namespace {
-    // Account backups are named "YYYYMMDD-HHMMSS username": the timestamp is the
-    // row's mono title, the trailing username (if any) becomes the right-hand
-    // user chip. Custom-named backups (user typed their own name, possibly with
-    // spaces) must not be split — only a "YYYYMMDD-HHMMSS" prefix triggers it.
-    void splitBackupName(const std::string& full, std::string& name, std::string& chip)
-    {
-        size_t sp              = full.find(' ');
-        const bool timestamped = sp == 15 && full[8] == '-' &&
-                                 std::all_of(full.begin(), full.begin() + 8, [](unsigned char c) { return std::isdigit(c); }) &&
-                                 std::all_of(full.begin() + 9, full.begin() + 15, [](unsigned char c) { return std::isdigit(c); });
-        if (!timestamped) {
-            name = full;
-            chip.clear();
-        }
-        else {
-            name = full.substr(0, sp);
-            chip = full.substr(sp + 1);
-        }
-    }
-}
-
 void BackupList::draw(bool focused)
 {
     const size_t total = displayCount();
@@ -269,24 +246,27 @@ void BackupList::draw(bool focused)
             continue;
         }
 
-        // The folder name is "YYYYMMDD-HHMMSS[ username]"; show only the
-        // timestamp on the left and the folder's on-disk size on the right (the
-        // trailing username is dropped — the size is the useful per-row fact).
-        // An existing backup: translate the on-screen row to its cell (saves) index.
-        const size_t cell = rowToCell(i);
-        std::string name, chip;
-        splitBackupName(mNames[cell], name, chip);
+        const size_t cell       = rowToCell(i);
+        const std::string& name = mNames[cell];
+        std::string sizeStr     = cell < mSizes.size() ? mSizes[cell] : std::string();
+        u32 sizeW = 0, sizeH = 0;
+        if (!sizeStr.empty()) {
+            Gfx::GetTextDimensions(12, sizeStr.c_str(), &sizeW, &sizeH, FontFamily::Mono);
+        }
 
+        const int nameX = mListX + 16;
+        const int sizeX = mListX + mListW - 12 - (int)sizeW;
+        const int nameW = sizeX - nameX - 8;
         u32 nameH;
         Gfx::GetTextDimensions(13, name.c_str(), NULL, &nameH, FontFamily::Mono);
-        Gfx::DrawText(13, mListX + 16, ry + (ROW_H - (int)nameH) / 2, cur ? COLOR_TEXT : COLOR_MONO_VAL, name.c_str(), FontFamily::Mono);
+        if (nameW > 0) {
+            Gfx::SetScissor(nameX, mListY, nameW, windowH);
+            Gfx::DrawText(13, nameX, ry + (ROW_H - (int)nameH) / 2, cur ? COLOR_TEXT : COLOR_MONO_VAL, name.c_str(), FontFamily::Mono);
+            Gfx::SetScissor(mListX - 2, mListY, mListW + 4, windowH);
+        }
 
-        std::string sizeStr = cell < mSizes.size() ? mSizes[cell] : std::string();
         if (!sizeStr.empty()) {
-            u32 sw, sh;
-            Gfx::GetTextDimensions(12, sizeStr.c_str(), &sw, &sh, FontFamily::Mono);
-            Gfx::DrawText(
-                12, mListX + mListW - 12 - (int)sw, ry + (ROW_H - (int)sh) / 2, cur ? COLOR_TEXT2 : COLOR_TEXT3, sizeStr.c_str(), FontFamily::Mono);
+            Gfx::DrawText(12, sizeX, ry + (ROW_H - (int)sizeH) / 2, cur ? COLOR_TEXT2 : COLOR_TEXT3, sizeStr.c_str(), FontFamily::Mono);
         }
     }
 
@@ -320,44 +300,41 @@ void BackupList::draw(bool focused)
     }
 }
 
-namespace {
-    // The date-stamped folder name suggested for a new backup. Account saves also
-    // append the (ASCII-folded) user name; the special save kinds use the bare date.
-    std::string backupSuggestion(Title& title)
-    {
-        if (!SaveDataSource(title.saveDataType()).isUserAccount()) {
-            return DateTime::dateTimeStr();
-        }
-        return DateTime::dateTimeStr() + " " +
-               (StringUtils::containsInvalidChar(Account::username(title.userId()))
-                       ? ""
-                       : StringUtils::removeNotAscii(StringUtils::removeAccents(Account::username(title.userId()))));
-    }
-}
-
 std::optional<std::string> BackupList::chooseDst(Title& title, size_t cellIndex, bool& usedKeyboardFallback)
 {
     usedKeyboardFallback = false;
     if (cellIndex != 0) {
         return title.fullPath(cellIndex);
     }
-    std::string suggestion = backupSuggestion(title);
-    std::string name;
-    // Quick backup (or multi-select) skips the keyboard prompt and takes the
-    // timestamp directly
-    if (MS::multipleSelectionEnabled() || Configuration::getInstance().isQuickBackupEnabled()) {
-        name = suggestion;
-    }
-    else if (KeyboardManager::get().isSystemKeyboardAvailable().first) {
-        std::pair<bool, std::string> response = KeyboardManager::get().keyboard(suggestion);
-        if (!response.first) {
-            return std::nullopt;
+
+    std::string name = DateTime::dateTimeStr();
+    if (!MS::multipleSelectionEnabled() && !Configuration::getInstance().isQuickBackupEnabled()) {
+        if (KeyboardManager::get().isSystemKeyboardAvailable().first) {
+            auto [accepted, input] = KeyboardManager::get().keyboard(name);
+            if (!accepted) {
+                return std::nullopt;
+            }
+            if (!input.empty()) {
+                input = StringUtils::removeForbiddenCharacters(input);
+            }
+            if (input.find_first_not_of(' ') != std::string::npos) {
+                name = std::move(input);
+            }
         }
-        name = StringUtils::removeForbiddenCharacters(response.second);
+        else {
+            usedKeyboardFallback = true;
+        }
     }
-    else {
-        name                 = suggestion;
-        usedKeyboardFallback = true;
+
+    if (SaveDataSource(title.saveDataType()).isUserAccount()) {
+        std::string userName = title.userName();
+        if (!userName.empty()) {
+            userName = StringUtils::removeForbiddenCharacters(userName);
+        }
+        const size_t first = userName.find_first_not_of(' ');
+        if (first != std::string::npos) {
+            name = userName.substr(first) + " - " + name;
+        }
     }
     return title.path() + "/" + name;
 }
